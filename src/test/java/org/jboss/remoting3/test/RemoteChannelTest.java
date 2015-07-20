@@ -31,7 +31,9 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.security.NoSuchAlgorithmException;
 import java.security.PrivilegedAction;
+import java.security.spec.InvalidKeySpecException;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
@@ -53,8 +55,11 @@ import org.wildfly.security.auth.client.AuthenticationContext;
 import org.wildfly.security.auth.client.MatchRule;
 import org.wildfly.security.auth.provider.SimpleMapBackedSecurityRealm;
 import org.wildfly.security.auth.server.SecurityDomain;
+import org.wildfly.security.password.Password;
 import org.wildfly.security.password.PasswordFactory;
-import org.wildfly.security.password.spec.ClearPasswordSpec;
+import org.wildfly.security.password.interfaces.DigestPassword;
+import org.wildfly.security.password.spec.DigestPasswordAlgorithmSpec;
+import org.wildfly.security.password.spec.EncryptablePasswordSpec;
 import org.wildfly.security.sasl.util.ServiceLoaderSaslServerFactory;
 import org.xnio.FutureResult;
 import org.xnio.IoFuture;
@@ -73,22 +78,31 @@ public final class RemoteChannelTest extends ChannelTestBase {
     private Connection connection;
     private Registration serviceRegistration;
 
+    static final String ALGORITHM = "digest-md5";
+    static final String REALM = "mainRealm";
+    static final String USERNAME = "bob";
+    static final String PASSWORD = "pass";
+
     @BeforeClass
     public static void create() throws Exception {
         endpoint = Endpoint.builder().setEndpointName("test").build();
         NetworkServerProvider networkServerProvider = endpoint.getConnectionProviderInterface("remote", NetworkServerProvider.class);
         final SecurityDomain.Builder domainBuilder = SecurityDomain.builder();
         final SimpleMapBackedSecurityRealm mainRealm = new SimpleMapBackedSecurityRealm();
-        domainBuilder.addRealm("mainRealm", mainRealm);
-        domainBuilder.setDefaultRealmName("mainRealm");
-        final PasswordFactory passwordFactory = PasswordFactory.getInstance("clear");
-        mainRealm.setPasswordMap("bob", passwordFactory.generatePassword(new ClearPasswordSpec("pass".toCharArray())));
+        domainBuilder.addRealm(REALM, mainRealm);
+        domainBuilder.setDefaultRealmName(REALM);
+
+        Password password = createPassword();
+
+        mainRealm.setPasswordMap("bob", password);
+
+
         final SaslServerFactory saslServerFactory = new ServiceLoaderSaslServerFactory(RemoteChannelTest.class.getClassLoader());
         streamServer = networkServerProvider.createServer(new InetSocketAddress("localhost", 30123), OptionMap.EMPTY, domainBuilder.build(), saslServerFactory);
     }
 
     @Before
-    public void testStart() throws IOException, URISyntaxException, InterruptedException {
+    public void testStart() throws IOException, URISyntaxException, InterruptedException, NoSuchAlgorithmException, InvalidKeySpecException {
         final FutureResult<Channel> passer = new FutureResult<Channel>();
         serviceRegistration = endpoint.registerService("org.jboss.test", new OpenListener() {
             public void channelOpened(final Channel channel) {
@@ -98,7 +112,9 @@ public final class RemoteChannelTest extends ChannelTestBase {
             public void registrationTerminated() {
             }
         }, OptionMap.EMPTY);
-        IoFuture<Connection> futureConnection = AuthenticationContext.empty().with(MatchRule.ALL, AuthenticationConfiguration.EMPTY.useName("bob").usePassword("pass").allowSaslMechanisms("SCRAM-SHA-256")).run(new PrivilegedAction<IoFuture<Connection>>() {
+
+        Password password = createPassword();
+        IoFuture<Connection> futureConnection = AuthenticationContext.empty().with(MatchRule.ALL, AuthenticationConfiguration.EMPTY.useName("bob").usePassword(password).allowSaslMechanisms("DIGEST-MD5")).run(new PrivilegedAction<IoFuture<Connection>>() {
             public IoFuture<Connection> run() {
                 try {
                     return endpoint.connect(new URI("remote://localhost:30123"), OptionMap.EMPTY);
@@ -115,6 +131,13 @@ public final class RemoteChannelTest extends ChannelTestBase {
         assertNotNull(recvChannel);
         assertNull("No SSLSession", recvChannel.getConnection().getSslSession());
 //        assertEquals("bob",recvChannel.getConnection().getUserInfo().getUserName());
+    }
+
+    private static Password createPassword() throws NoSuchAlgorithmException, InvalidKeySpecException {
+        PasswordFactory factory = PasswordFactory.getInstance(ALGORITHM);
+        DigestPasswordAlgorithmSpec dpas = new DigestPasswordAlgorithmSpec(ALGORITHM, USERNAME, REALM);
+        EncryptablePasswordSpec encryptableSpec = new EncryptablePasswordSpec(PASSWORD.toCharArray(), dpas);
+        return (DigestPassword) factory.generatePassword(encryptableSpec);
     }
 
     @After
